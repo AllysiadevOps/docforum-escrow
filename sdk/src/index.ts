@@ -127,6 +127,8 @@ export interface Escrow {
    * relying on a `Funded` escrow (threat model T8).
    */
   refundAfter?: bigint;
+  /** Earliest ledger timestamp at which release is allowed. Omit for immediate release. */
+  releaseNotBefore?: bigint;
   /** Whether to call the contract payee's on_escrow_released hook. Defaults to false. */
   notifyPayee: boolean;
   /**
@@ -206,6 +208,8 @@ export interface CreateEscrowParams {
    * (rejected with `InvalidRefundTo`, error 21).
    */
   refundTo?: string;
+  /** Earliest ledger timestamp at which release is allowed; omit for immediate release. */
+  releaseNotBefore?: bigint;
 }
 
 export interface ReleaseOrRefundParams {
@@ -416,7 +420,7 @@ export class EscrowClient {
       );
     }
     const client = this.contractClient(params.payer);
-    const tx = await client.create_escrow({
+    const createParams = {
       payer: params.payer.publicKey(),
       payee: params.payee,
       token: params.token,
@@ -426,7 +430,13 @@ export class EscrowClient {
       refund_after: params.refundAfter,
       notify_payee: params.notifyPayee ?? false,
       refund_to: params.refundTo,
-    });
+    };
+    const tx = params.releaseNotBefore === undefined
+      ? await client.create_escrow(createParams)
+      : await client.create_escrow_release_time({
+          ...createParams,
+          release_not_before: params.releaseNotBefore,
+        });
     const sent = await tx.signAndSend();
     return { escrowId: sent.result.unwrap(), txHash: sent.sendTransactionResponse!.hash };
   }
@@ -513,6 +523,7 @@ export class EscrowClient {
       refundAfter: data.refund_after ?? undefined,
       notifyPayee: data.notify_payee,
       refundTo: data.refund_to,
+      releaseNotBefore: data.release_not_before ?? undefined,
       status: data.status.tag,
     };
   }
