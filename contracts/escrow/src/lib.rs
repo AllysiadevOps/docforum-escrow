@@ -45,7 +45,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, token,
     Address, Env, IntoVal, String, Vec,
 };
 
@@ -157,6 +158,18 @@ pub struct EscrowData {
     pub fee_bps: Option<u32>,
 }
 
+/// Identifies voluntary refunds started by the escrow's stored payee.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayeeRefunded {
+    #[topic]
+    pub escrow_id: u64,
+    #[topic]
+    pub payer: Address,
+    #[topic]
+    pub payee: Address,
+    pub amount: i128,
+}
 /// Maximum `fee_bps`: 1 000 basis points out of [`BASIS_POINTS`] 10 000
 /// = 10 %. A platform fee fixed at creation must be transparent but
 /// cannot be the arrangement itself — see docs/adr/0010.
@@ -1069,15 +1082,34 @@ impl EscrowContract {
     /// `refund_after` set, behaviour is identical to before the timeout
     /// existed — releaser only. On an M-of-N escrow the releaser path needs
     /// a threshold of 1; otherwise use `refund_with_approvals` (the timeout
-    /// path stays open to anyone).
-    ///
-    /// A protocol fee (docs/adr/0010) is never taken on the refund path:
-    /// the stored `refund_to` receives the full stored `amount`.
+    /// path stays open to anyone). The stored payee may also voluntarily
+    /// refund a funded escrow; that path emits `payee_refunded` (ADR 0010).
+    /// A protocol fee is never taken on the refund path.
     pub fn refund(env: Env, escrow_id: u64, caller: Address) -> Result<(), Error> {
         caller.require_auth();
 
-        let mut data = Self::refund_checks(&env, escrow_id, &caller)?;
-        Self::settle(&env, escrow_id, &mut data, EscrowStatus::Refunded)
+        let loaded = Self::load(&env, escrow_id)?;
+        let payee_initiated = caller == loaded.payee;
+        let mut data = if payee_initiated {
+            // Keep pooled refunds pull-based and require a funded escrow for
+            // the payee-authorized path, which bypasses the releaser check.
+            Self::reject_pooled(&env, escrow_id)?;
+            Self::check_funded(&loaded)?;
+            loaded
+        } else {
+            Self::refund_checks(&env, escrow_id, &caller)?
+        };
+        Self::settle(&env, escrow_id, &mut data, EscrowStatus::Refunded)?;
+        if payee_initiated {
+            PayeeRefunded {
+                escrow_id,
+                payer: data.payer,
+                payee: data.payee,
+                amount: data.amount,
+            }
+            .publish(&env);
+        }
+        Ok(())
     }
 
     /// Lets the payer take the funds back **before the payee accepts**
